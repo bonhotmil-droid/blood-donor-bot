@@ -1,0 +1,21 @@
+{
+  "name": "blood-donation-whatsapp-telegram-bots",
+  "version": "1.0.0",
+  "description": "WhatsApp and Telegram bots for blood donor registration and search, connected to website API.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.18",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "node-telegram-bot-api": "^0.66.0",
+    "pino": "^9.6.0",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
