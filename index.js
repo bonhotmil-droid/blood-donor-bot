@@ -1,9 +1,9 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
-const TelegramBot = require('node-telegram-bot-api');
 const qrcode = require('qrcode-terminal');
-const pino = require('pino');
+const P = require('pino');
+const { Telegraf, Markup } = require('telegraf');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -12,163 +12,134 @@ const {
 } = require('@whiskeysockets/baileys');
 
 const PORT = process.env.PORT || 10000;
-const API_BASE_URL = process.env.API_BASE_URL;
+const API_URL = process.env.API_URL;
 const BOT_API_KEY = process.env.BOT_API_KEY;
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const BOT_NAME = process.env.BOT_NAME || 'بنك تهامة للتبرع بالدم';
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const ENABLE_TELEGRAM = String(process.env.ENABLE_TELEGRAM || 'true').toLowerCase() === 'true';
+const ENABLE_WHATSAPP = String(process.env.ENABLE_WHATSAPP || 'true').toLowerCase() === 'true';
+
+if (!API_URL || !BOT_API_KEY) {
+  console.error('❌ Missing API_URL or BOT_API_KEY in Environment Variables');
+}
 
 const sessions = new Map();
 const app = express();
 app.use(express.json());
-app.get('/', (_, res) => res.send(`${BOT_NAME} bots are running`));
-app.get('/health', (_, res) => res.json({ ok: true, bot: BOT_NAME }));
-app.listen(PORT, () => console.log(`Health server running on port ${PORT}`));
+app.get('/', (req, res) => res.send('bots are running بنك تهامة للتبرع بالدم'));
+app.get('/health', (req, res) => res.json({ ok: true, service: 'blood-donor-bots' }));
+app.listen(PORT, () => console.log(`✅ Web server running on port ${PORT}`));
 
-function normalizeText(text = '') { return String(text).trim(); }
-function apiRequest(action, payload = {}) {
-  return axios.post(API_BASE_URL, { action, api_key: BOT_API_KEY, ...payload }, { timeout: 20000 }).then(r => r.data);
-}
-function mainMenu() {
-  return `🩸 مرحباً بك في ${BOT_NAME}\n\nاكتب الرقم المطلوب:\n1️⃣ تسجيل متبرع جديد\n2️⃣ البحث عن متبرع\n3️⃣ إحصائيات\n4️⃣ مساعدة\n\nيمكنك كتابة: تسجيل أو بحث`;
-}
-function helpText() {
-  return `طريقة الاستخدام:\n\nللتسجيل: اكتب تسجيل واتبع الأسئلة.\nللبحث: اكتب بحث ثم أدخل الفصيلة والمحافظة والمديرية.\n\nالفصائل المقبولة: A+ A- B+ B- AB+ AB- O+ O-`;
-}
-function cleanBlood(v) { return String(v || '').toUpperCase().replace(/\s+/g, ''); }
-function isValidBlood(v) { return ['A+','A-','B+','B-','AB+','AB-','O+','O-'].includes(cleanBlood(v)); }
-function isValidPhone(v) { return /^7\d{8}$/.test(String(v || '').replace(/\D/g, '').replace(/^967/, '')); }
-function phoneOnly(v) { const p = String(v || '').replace(/\D/g, ''); return p.startsWith('967') && p.length === 12 ? p.slice(3) : p; }
-function genderValue(text) {
-  const t = String(text || '').toLowerCase();
-  if (['ذكر', 'male', 'm', 'رجل'].includes(t)) return 'male';
-  if (['انثى', 'أنثى', 'female', 'f', 'امرأة', 'بنت'].includes(t)) return 'female';
-  return null;
-}
-function formatDonors(donors) {
-  if (!donors || donors.length === 0) return 'لم يتم العثور على متبرعين مطابقين حالياً.';
-  return donors.map((d, i) => {
-    const hidden = d.gender === 'female';
-    const contact = hidden ? 'التواصل: عبر الإدارة حفاظاً على الخصوصية' : `الهاتف: ${d.phone}${d.whatsapp ? `\nواتساب: ${d.whatsapp}` : ''}`;
-    return `${i + 1}) ${hidden ? 'متبرعة - محمية الخصوصية' : d.full_name}\nالفصيلة: ${d.blood_type}\nالموقع: ${d.governorate} - ${d.district}\nآخر تبرع: ${d.last_donation_date || 'غير محدد'}\nالوقت المناسب: ${d.best_call_time || 'غير محدد'}\n${contact}`;
-  }).join('\n\n');
-}
-function startRegister(platform, userId) {
-  sessions.set(`${platform}:${userId}`, { mode: 'register', step: 0, data: {} });
-  return 'تمام ✅ سنسجل متبرع جديد بنفس قاعدة بيانات الموقع.\n\nأرسل الاسم الكامل:';
-}
-function startSearch(platform, userId) {
-  sessions.set(`${platform}:${userId}`, { mode: 'search', step: 0, data: {} });
-  return '🔎 أرسل فصيلة الدم المطلوبة مثل: O+ أو A- أو AB+';
-}
-const registerSteps = [
-  { key: 'full_name', ask: 'أرسل الاسم الكامل:' },
-  { key: 'age', ask: 'أرسل العمر بين 18 و 65:', validate: v => Number(v) >= 18 && Number(v) <= 65, err: 'العمر يجب أن يكون بين 18 و 65.' },
-  { key: 'gender', ask: 'أرسل الجنس: ذكر أو أنثى', transform: genderValue, validate: v => !!genderValue(v), err: 'اكتب ذكر أو أنثى.' },
-  { key: 'blood_type', ask: 'أرسل فصيلة الدم: A+ A- B+ B- AB+ AB- O+ O-', transform: cleanBlood, validate: isValidBlood, err: 'فصيلة الدم غير صحيحة.' },
-  { key: 'phone', ask: 'أرسل رقم الهاتف 9 أرقام يبدأ بـ 7:', transform: phoneOnly, validate: isValidPhone, err: 'رقم الهاتف يجب أن يكون 9 أرقام ويبدأ بـ 7.' },
-  { key: 'whatsapp', ask: 'أرسل رقم الواتساب 9 أرقام يبدأ بـ 7، أو اكتب نفس:', transform: (v, data) => String(v).trim() === 'نفس' ? data.phone : phoneOnly(v), validate: (v, data) => String(v).trim() === 'نفس' || isValidPhone(v), err: 'رقم الواتساب غير صحيح.' },
-  { key: 'governorate', ask: 'أرسل المحافظة:' },
-  { key: 'district', ask: 'أرسل المديرية:' },
-  { key: 'address', ask: 'أرسل العنوان التفصيلي:' },
-  { key: 'nearest_center', ask: 'أرسل أقرب مركز/مستشفى:' },
-  { key: 'last_donation_date', ask: 'أرسل تاريخ آخر تبرع بصيغة YYYY-MM-DD أو اكتب لا:' },
-  { key: 'best_call_time', ask: 'أرسل أفضل وقت للاتصال، مثال: من 4 العصر إلى 9 مساءً:' },
-  { key: 'password', ask: 'أرسل كلمة مرور للحساب 8 أحرف على الأقل:', validate: v => String(v).length >= 8, err: 'كلمة المرور يجب أن تكون 8 أحرف على الأقل.' }
-];
-async function handleRegister(session, text, platform, userId, senderName) {
-  const step = registerSteps[session.step];
-  let value = text;
-  if (step.validate && !step.validate(value, session.data)) return step.err + '\n' + step.ask;
-  if (step.transform) value = step.transform(value, session.data);
-  session.data[step.key] = value;
-  session.step++;
-  if (session.step < registerSteps.length) return registerSteps[session.step].ask;
-  const result = await apiRequest('register_donor', { ...session.data, platform, platform_user_id: userId, platform_name: senderName });
-  sessions.delete(`${platform}:${userId}`);
-  return result.ok ? `✅ ${result.message}\n\nاسم المستخدم للدخول إلى الموقع هو رقم الهاتف: ${session.data.phone}` : `❌ ${result.message}`;
-}
-async function handleSearch(session, text, platform, userId) {
-  if (session.step === 0) {
-    if (!isValidBlood(text)) return 'فصيلة الدم غير صحيحة. مثال: O+ أو A- أو AB+';
-    session.data.blood_type = cleanBlood(text);
-    session.step = 1;
-    return 'أرسل المحافظة، أو اكتب الكل:';
-  }
-  if (session.step === 1) {
-    if (text !== 'الكل') session.data.governorate = text;
-    session.step = 2;
-    return 'أرسل المديرية، أو اكتب الكل:';
-  }
-  if (session.step === 2) {
-    if (text !== 'الكل') session.data.district = text;
-    const result = await apiRequest('search_donors', session.data);
-    sessions.delete(`${platform}:${userId}`);
-    return result.ok ? formatDonors(result.donors) : `❌ ${result.message}`;
-  }
-}
-async function handleMessage(platform, userId, text, senderName = '') {
-  text = normalizeText(text);
-  const key = `${platform}:${userId}`;
-  const lower = text.toLowerCase();
-  try {
-    if (!text || lower === '/start' || text === '0' || text === 'القائمة') return mainMenu();
-    if (text === '4' || text.includes('مساعدة') || lower === 'help') return helpText();
-    if (text === '1' || text.includes('تسجيل')) return startRegister(platform, userId);
-    if (text === '2' || text.includes('بحث') || text.includes('ابحث')) return startSearch(platform, userId);
-    if (text === '3' || text.includes('احصائيات') || text.includes('إحصائيات')) {
-      const s = await apiRequest('stats', {});
-      if (!s.ok) return 'تعذر جلب الإحصائيات.';
-      return `📊 إجمالي المتبرعين: ${s.total}\n` + s.by_blood.map(x => `${x.blood_type}: ${x.total}`).join('\n');
-    }
-    const session = sessions.get(key);
-    if (!session) return mainMenu();
-    if (session.mode === 'register') return await handleRegister(session, text, platform, userId, senderName);
-    if (session.mode === 'search') return await handleSearch(session, text, platform, userId);
-    return mainMenu();
-  } catch (e) {
-    console.error('handleMessage error:', e.message);
-    return 'حدث خطأ مؤقت. حاول مرة أخرى.';
-  }
-}
-
-if (TELEGRAM_BOT_TOKEN && TELEGRAM_BOT_TOKEN !== 'PUT_YOUR_TELEGRAM_BOT_TOKEN_HERE') {
-  const tg = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
-  tg.on('message', async (msg) => {
-    const text = msg.text || '';
-    const reply = await handleMessage('telegram', msg.chat.id, text, msg.from?.first_name || '');
-    tg.sendMessage(msg.chat.id, reply);
+async function apiRequest(action, payload = {}) {
+  const { data } = await axios.post(API_URL, { action, ...payload }, {
+    headers: { 'X-BOT-API-KEY': BOT_API_KEY, 'Content-Type': 'application/json' },
+    timeout: 20000
   });
-  console.log('Telegram bot started');
-} else {
-  console.log('Telegram bot token not set, Telegram disabled');
+  return data;
+}
+
+function normalizeBlood(text='') {
+  return text.toUpperCase().replace('او موجب','O+').replace('او سالب','O-').trim();
+}
+
+function helpText() {
+  return `🩸 بنك تهامة للتبرع بالدم\n\nالأوامر:\nتسجيل - لتسجيل متبرع جديد\nبحث O+ - البحث حسب الفصيلة\nبحث O+ تعز - البحث حسب الفصيلة والمحافظة\nمساعدة - عرض التعليمات`;
+}
+
+function startRegister(userId) {
+  sessions.set(userId, { mode: 'register', step: 'full_name', data: {} });
+  return 'اكتب الاسم الكامل للمتبرع:';
+}
+
+async function handleMessage(userId, text, senderPhone='') {
+  text = (text || '').trim();
+  const low = text.toLowerCase();
+
+  if (!text || ['مساعدة','مساعده','help','/help','/start'].includes(low)) return helpText();
+  if (['تسجيل','سجل','register'].includes(low)) return startRegister(userId);
+
+  if (low.startsWith('بحث') || low.startsWith('search')) {
+    const parts = text.split(/\s+/).slice(1);
+    const blood_type = normalizeBlood(parts[0] || '');
+    const governorate = parts.slice(1).join(' ');
+    if (!blood_type) return 'اكتب البحث هكذا:\nبحث O+\nأو:\nبحث O+ تعز';
+    try {
+      const res = await apiRequest('search_donors', { blood_type, governorate });
+      if (!res.ok) return 'تعذر البحث: ' + (res.error || 'خطأ غير معروف');
+      if (!res.donors || res.donors.length === 0) return 'لم يتم العثور على متبرعين مطابقين.';
+      return res.donors.slice(0, 10).map((d, i) =>
+        `${i+1}) ${d.full_name || 'متبرع'}\n🩸 ${d.blood_type || ''}\n📍 ${d.governorate || ''} - ${d.district || ''}\n📞 ${d.phone || d.whatsapp || ''}`
+      ).join('\n\n');
+    } catch (e) {
+      return 'خطأ اتصال مع API الموقع: ' + e.message;
+    }
+  }
+
+  const s = sessions.get(userId);
+  if (!s || s.mode !== 'register') return 'لم أفهم طلبك. اكتب: مساعدة';
+
+  const d = s.data;
+  if (s.step === 'full_name') { d.full_name = text; s.step = 'blood_type'; return 'اكتب فصيلة الدم مثل: O+ أو A- أو B+ أو AB+'; }
+  if (s.step === 'blood_type') { d.blood_type = normalizeBlood(text); s.step = 'phone'; return 'اكتب رقم الهاتف:'; }
+  if (s.step === 'phone') { d.phone = text; d.whatsapp = senderPhone || text; s.step = 'governorate'; return 'اكتب المحافظة:'; }
+  if (s.step === 'governorate') { d.governorate = text; s.step = 'district'; return 'اكتب المديرية/المنطقة:'; }
+  if (s.step === 'district') {
+    d.district = text;
+    sessions.delete(userId);
+    try {
+      const res = await apiRequest('register_donor', d);
+      if (!res.ok) return 'تعذر التسجيل: ' + (res.error || 'خطأ غير معروف');
+      return '✅ تم تسجيل المتبرع بنجاح في قاعدة بيانات الموقع.\nجزاك الله خيرًا.';
+    } catch (e) {
+      return 'خطأ اتصال مع API الموقع: ' + e.message;
+    }
+  }
+  return 'حدث خطأ في الجلسة. اكتب تسجيل للبدء من جديد.';
+}
+
+async function startTelegram() {
+  if (!ENABLE_TELEGRAM) return console.log('ℹ️ Telegram disabled');
+  if (!TELEGRAM_TOKEN || TELEGRAM_TOKEN.includes('PUT_')) return console.log('⚠️ TELEGRAM_TOKEN missing, Telegram bot not started');
+  const bot = new Telegraf(TELEGRAM_TOKEN);
+  bot.start(ctx => ctx.reply(helpText(), Markup.keyboard([['🩸 تسجيل متبرع'], ['🔎 بحث O+']]).resize()));
+  bot.hears('🩸 تسجيل متبرع', ctx => ctx.reply(startRegister('tg:' + ctx.from.id)));
+  bot.hears(/🔎 بحث/i, ctx => ctx.reply('اكتب مثلًا: بحث O+ تعز'));
+  bot.on('text', async ctx => {
+    const reply = await handleMessage('tg:' + ctx.from.id, ctx.message.text);
+    await ctx.reply(reply);
+  });
+  await bot.launch();
+  console.log('✅ Telegram bot started');
 }
 
 async function startWhatsApp() {
-  if (!API_BASE_URL || !BOT_API_KEY) console.error('Missing API_BASE_URL or BOT_API_KEY');
-  const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
+  if (!ENABLE_WHATSAPP) return console.log('ℹ️ WhatsApp disabled');
+  const { state, saveCreds } = await useMultiFileAuthState('./auth_info_baileys');
   const { version } = await fetchLatestBaileysVersion();
-  const sock = makeWASocket({ version, auth: state, logger: pino({ level: 'silent' }) });
+  const sock = makeWASocket({ version, auth: state, logger: P({ level: 'silent' }), printQRInTerminal: false });
   sock.ev.on('creds.update', saveCreds);
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
     if (qr) {
-      console.log('Scan this WhatsApp QR:');
+      console.log('📱 امسح QR التالي من واتساب > الأجهزة المرتبطة > ربط جهاز');
       qrcode.generate(qr, { small: true });
     }
+    if (connection === 'open') console.log('✅ WhatsApp connected');
     if (connection === 'close') {
-      const code = lastDisconnect?.error?.output?.statusCode;
-      if (code !== DisconnectReason.loggedOut) startWhatsApp();
-      else console.log('WhatsApp logged out. Delete baileys_auth_info and redeploy to scan again.');
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      console.log('⚠️ WhatsApp disconnected:', statusCode);
+      if (statusCode !== DisconnectReason.loggedOut) startWhatsApp();
+      else console.log('❌ WhatsApp logged out. Delete auth_info_baileys and redeploy to scan QR again.');
     }
-    if (connection === 'open') console.log('WhatsApp bot connected');
   });
   sock.ev.on('messages.upsert', async ({ messages }) => {
-    const m = messages[0];
-    if (!m.message || m.key.fromMe) return;
-    const from = m.key.remoteJid;
-    const text = m.message.conversation || m.message.extendedTextMessage?.text || '';
-    if (!text) return;
-    const reply = await handleMessage('whatsapp', from, text, m.pushName || '');
-    await sock.sendMessage(from, { text: reply });
+    const msg = messages[0];
+    if (!msg.message || msg.key.fromMe) return;
+    const jid = msg.key.remoteJid;
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+    const phone = jid.replace('@s.whatsapp.net','').replace('@g.us','');
+    const reply = await handleMessage('wa:' + jid, text, phone);
+    await sock.sendMessage(jid, { text: reply });
   });
 }
-startWhatsApp().catch(err => console.error('WhatsApp start error:', err));
+
+startTelegram().catch(e => console.error('❌ Telegram error:', e));
+startWhatsApp().catch(e => console.error('❌ WhatsApp error:', e));
