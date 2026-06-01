@@ -1,7 +1,7 @@
 {
-  "name": "blood-donor-bots",
-  "version": "1.0.0",
-  "description": "WhatsApp Baileys + Telegram bot for blood donors connected to website API",
+  "name": "blood-donor-bots-complete",
+  "version": "2.0.0",
+  "description": "Telegram + WhatsApp Baileys bots for بنك تهامة للتبرع بالدم connected to website API",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -15,6 +15,7 @@
     "dotenv": "latest",
     "express": "latest",
     "pino": "latest",
+    "qrcode": "latest",
     "qrcode-terminal": "latest",
     "telegraf": "latest"
   }
